@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Augustus Duel Prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #17120d;
+      --panel: #241b13;
+      --line: #4c3928;
+      --sand: #7a6243;
+      --red: #c84e43;
+      --blue: #4b7bd1;
+      --gold: #d6b25e;
+      --text: #f2e7cf;
+      --muted: #c1aa84;
+    }
+    body {
+      margin: 0;
+      font-family: Georgia, serif;
+      background: radial-gradient(circle at top, #2d2117, var(--bg));
+      color: var(--text);
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      min-height: 100vh;
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(0,0,0,.18), rgba(0,0,0,.05)), var(--panel);
+      padding: 16px;
+      box-sizing: border-box;
+    }
+    h1, h2, h3, p { margin: 0 0 12px; }
+    .card {
+      border: 1px solid var(--line);
+      padding: 12px;
+      margin-bottom: 12px;
+      background: rgba(255,255,255,.03);
+    }
+    .player.red { border-left: 4px solid var(--red); }
+    .player.blue { border-left: 4px solid var(--blue); }
+    .row { display: flex; justify-content: space-between; gap: 8px; }
+    .small { color: var(--muted); font-size: 0.92rem; }
+    button {
+      width: 100%;
+      padding: 10px;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      background: #3a2a1b;
+      color: var(--text);
+      cursor: pointer;
+      font-family: inherit;
+    }
+    button:hover { background: #523a24; }
+    main {
+      padding: 16px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 12px;
+      box-sizing: border-box;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    canvas {
+      width: min(1100px, calc(100vw - 380px));
+      height: min(760px, calc(100vh - 90px));
+      border: 1px solid var(--line);
+      background: #5f6d42;
+      image-rendering: pixelated;
+    }
+    .badge {
+      display: inline-block;
+      border: 1px solid var(--line);
+      padding: 4px 8px;
+      background: rgba(0,0,0,.15);
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>Augustus Duel</h1>
+    <p class="small">Prototype HTML5 Canvas : carte partagée, routes contestées, roadblocks et tours simultanés courts.</p>
+
+    <section class="card player red" id="player-0-panel"></section>
+    <section class="card player blue" id="player-1-panel"></section>
+
+    <section class="card">
+      <h2>Sénat & tour</h2>
+      <div id="turn-panel"></div>
+      <button id="next-phase">Passer à la phase suivante</button>
+    </section>
+
+    <section class="card">
+      <h2>Actions prototype</h2>
+      <p class="small">Cliquez une route pour la revendiquer. Shift+clic pour poser ou retirer un roadblock. Alt+clic pour déclencher un sabotage mineur.</p>
+      <button id="toggle-active-player">Changer de gouverneur actif</button>
+    </section>
+  </aside>
+
+  <main>
+    <div class="toolbar">
+      <span class="badge" id="active-player-badge"></span>
+      <span class="badge" id="phase-badge"></span>
+      <span class="badge">Victoire : 5000 habitants ou 10000 denarii</span>
+    </div>
+    <canvas id="game" width="1100" height="760"></canvas>
+  </main>
+
+  <script>
+    const TILE = 40;
+    const MAP_W = 22;
+    const MAP_H = 15;
+    const PHASES = [
+      { name: 'Planification', duration: 20 },
+      { name: 'Simulation', duration: 40 },
+      { name: 'Sénat', duration: 10 },
+    ];
+
+    const palette = {
+      terrain: '#6f8551',
+      water: '#446b8c',
+      mountain: '#6d6559',
+      fertility: '#7d9e4f',
+      neutralRoad: '#a98b62',
+      contested: '#d6b25e',
+      owner0: '#c84e43',
+      owner1: '#4b7bd1',
+      roadblock: '#1c1510',
+      text: '#f2e7cf',
+      panel: '#241b13',
+      shadow: 'rgba(0,0,0,0.25)',
+    };
+
+    class SharedMap {
+      constructor(width, height) {
+        this.width = width;
+        this.height = height;
+        this.tiles = new Array(width * height).fill(null).map((_, index) => ({
+          terrain: (index % 13 === 0 || index % 17 === 0) ? 'fertility' : 'land',
+          districtId: -1,
+        }));
+        this.graphRevision = 1;
+        this.segments = [];
+        this.resources = [];
+        this.seed();
+      }
+
+      seed() {
+        this.resources.push(
+          { x: 4, y: 4, type: 'argile', ownerId: null, stock: 200 },
+          { x: 16, y: 3, type: 'bois', ownerId: null, stock: 180 },
+          { x: 8, y: 11, type: 'fer', ownerId: null, stock: 160 },
+          { x: 18, y: 10, type: 'marbre', ownerId: null, stock: 140 },
+        );
+
+        const roadBlueprint = [
+          [2, 2, 9, 2], [9, 2, 9, 6], [9, 6, 14, 6], [14, 6, 19, 6],
+          [2, 12, 8, 12], [8, 12, 8, 8], [8, 8, 14, 8], [14, 8, 19, 8],
+          [5, 2, 5, 12], [12, 2, 12, 12], [19, 4, 19, 11], [2, 7, 6, 7],
+        ];
+
+        this.segments = roadBlueprint.map((points, id) => ({
+          id,
+          ax: points[0], ay: points[1], bx: points[2], by: points[3],
+          ownerId: null,
+          contestedBy: null,
+          roadblockBy: null,
+          captureProgress: 0,
+          captureTarget: null,
+          lastGraphRevision: 1,
+        }));
+      }
+    }
+
+    class GovernorState {
+      constructor(id, color, name) {
+        this.id = id;
+        this.color = color;
+        this.name = name;
+        this.denarii = 2200;
+        this.population = 650;
+        this.favor = 24;
+        this.workersAvailable = 140;
+        this.workersEmployed = 90;
+        this.housing = 34;
+        this.cooldowns = {
+          sabotage: 0,
+          roadSeizure: 0,
+        };
+        this.stats = {
+          prosperity: 18,
+          culture: 8,
+        };
+      }
+    }
+
+    class Walker {
+      constructor(id, ownerId, type, route) {
+        this.id = id;
+        this.ownerId = ownerId;
+        this.type = type;
+        this.route = route;
+        this.routeIndex = 0;
+        this.progress = Math.random();
+        this.speed = 0.18 + Math.random() * 0.08;
+        this.direction = 1;
+        this.stuckTicks = 0;
+      }
+
+      get segmentId() {
+        return this.route[this.routeIndex];
+      }
+    }
+
+    class WalkerSystem {
+      constructor(sharedMap, governors) {
+        this.sharedMap = sharedMap;
+        this.governors = governors;
+        this.walkers = [];
+        this.spawn();
+      }
+
+      spawn() {
+        const templates = [
+          { ownerId: 0, type: 'prefet', route: [0, 1, 2, 3] },
+          { ownerId: 0, type: 'charretier', route: [8, 4, 5, 6] },
+          { ownerId: 0, type: 'migrant', route: [11, 8, 4] },
+          { ownerId: 1, type: 'prefet', route: [3, 2, 1, 0] },
+          { ownerId: 1, type: 'charretier', route: [10, 7, 6, 5] },
+          { ownerId: 1, type: 'migrant', route: [10, 3, 2] },
+        ];
+        this.walkers = templates.map((tpl, index) => new Walker(index, tpl.ownerId, tpl.type, tpl.route));
+      }
+
+      update(dt, phaseName) {
+        if (phaseName !== 'Simulation') return;
+
+        for (const walker of this.walkers) {
+          const segment = this.sharedMap.segments[walker.segmentId];
+          const blocked = segment.roadblockBy !== null && segment.roadblockBy !== walker.ownerId;
+
+          if (blocked) {
+            walker.stuckTicks += 1;
+            if (walker.stuckTicks > 20) {
+              walker.direction *= -1;
+              walker.routeIndex = Math.max(0, Math.min(walker.route.length - 1, walker.routeIndex + walker.direction));
+              walker.stuckTicks = 0;
+            }
+            continue;
+          }
+
+          walker.progress += walker.speed * dt;
+          walker.stuckTicks = 0;
+          if (walker.progress >= 1) {
+            walker.progress = 0;
+            walker.routeIndex += walker.direction;
+            if (walker.routeIndex >= walker.route.length || walker.routeIndex < 0) {
+              walker.direction *= -1;
+              walker.routeIndex += walker.direction * 2;
+            }
+          }
+        }
+      }
+    }
+
+    class ConflictSystem {
+      constructor(sharedMap, governors) {
+        this.sharedMap = sharedMap;
+        this.governors = governors;
+      }
+
+      captureSegment(segmentId, governorId) {
+        const segment = this.sharedMap.segments[segmentId];
+        const governor = this.governors[governorId];
+        if (governor.cooldowns.roadSeizure > 0) return false;
+        if (segment.roadblockBy !== null && segment.roadblockBy !== governorId) return false;
+
+        if (segment.ownerId === null) {
+          segment.ownerId = governorId;
+          governor.favor += 1;
+        } else if (segment.ownerId !== governorId) {
+          segment.contestedBy = governorId;
+          segment.captureTarget = governorId;
+          segment.captureProgress += 50;
+          if (segment.captureProgress >= 100) {
+            segment.ownerId = governorId;
+            segment.contestedBy = null;
+            segment.captureProgress = 0;
+            segment.captureTarget = null;
+            governor.favor += 2;
+          }
+        }
+
+        governor.cooldowns.roadSeizure = 8;
+        this.sharedMap.graphRevision += 1;
+        return true;
+      }
+
+      toggleRoadblock(segmentId, governorId) {
+        const segment = this.sharedMap.segments[segmentId];
+        segment.roadblockBy = segment.roadblockBy === governorId ? null : governorId;
+        this.sharedMap.graphRevision += 1;
+      }
+
+      sabotage(governorId, targetGovernorId) {
+        const attacker = this.governors[governorId];
+        const victim = this.governors[targetGovernorId];
+        if (attacker.cooldowns.sabotage > 0 || attacker.favor < 3 || attacker.denarii < 350) return false;
+
+        attacker.denarii -= 350;
+        attacker.favor -= 3;
+        attacker.cooldowns.sabotage = 18;
+        victim.workersAvailable = Math.max(0, victim.workersAvailable - 12);
+        victim.denarii = Math.max(0, victim.denarii - 120);
+        return true;
+      }
+
+      tickCooldowns() {
+        for (const governor of this.governors) {
+          Object.keys(governor.cooldowns).forEach((key) => {
+            governor.cooldowns[key] = Math.max(0, governor.cooldowns[key] - 1);
+          });
+        }
+      }
+    }
+
+    class SenateSystem {
+      constructor(governors) {
+        this.governors = governors;
+        this.turn = 1;
+        this.phaseIndex = 0;
+        this.timeLeft = PHASES[0].duration;
+        this.motion = 'Motion actuelle : le Sénat récompense les districts sans incendie.';
+      }
+
+      get phase() {
+        return PHASES[this.phaseIndex];
+      }
+
+      advancePhase() {
+        this.phaseIndex = (this.phaseIndex + 1) % PHASES.length;
+        if (this.phaseIndex === 0) {
+          this.turn += 1;
+          this.rollMotion();
+        }
+        this.timeLeft = this.phase.duration;
+      }
+
+      update(dt) {
+        this.timeLeft -= dt;
+        if (this.timeLeft <= 0) this.advancePhase();
+      }
+
+      rollMotion() {
+        const motions = [
+          'Motion actuelle : Rome réclame davantage de blé.',
+          'Motion actuelle : le commerce du marbre reçoit la faveur impériale.',
+          'Motion actuelle : les jeux et festivals améliorent le favor.',
+          'Motion actuelle : les routes contestées irritent le Sénat.',
+        ];
+        this.motion = motions[(this.turn - 1) % motions.length];
+      }
+    }
+
+    class Game {
+      constructor(canvas) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.map = new SharedMap(MAP_W, MAP_H);
+        this.governors = [
+          new GovernorState(0, palette.owner0, 'Gouverneur Aemilius'),
+          new GovernorState(1, palette.owner1, 'Gouverneur Drusus'),
+        ];
+        this.activeGovernorId = 0;
+        this.walkers = new WalkerSystem(this.map, this.governors);
+        this.conflicts = new ConflictSystem(this.map, this.governors);
+        this.senate = new SenateSystem(this.governors);
+        this.accumulator = 0;
+        this.lastTime = performance.now();
+        this.fixedStep = 1 / 10;
+        this.winner = null;
+        this.setupInput();
+        this.updatePanels();
+        requestAnimationFrame(this.frame.bind(this));
+      }
+
+      setupInput() {
+        this.canvas.addEventListener('click', (event) => {
+          const rect = this.canvas.getBoundingClientRect();
+          const x = ((event.clientX - rect.left) / rect.width) * this.canvas.width;
+          const y = ((event.clientY - rect.top) / rect.height) * this.canvas.height;
+          const segment = this.findSegmentAt(x, y);
+          if (!segment || this.winner) return;
+
+          if (event.shiftKey) {
+            this.conflicts.toggleRoadblock(segment.id, this.activeGovernorId);
+          } else if (event.altKey) {
+            const target = this.activeGovernorId === 0 ? 1 : 0;
+            this.conflicts.sabotage(this.activeGovernorId, target);
+          } else {
+            this.conflicts.captureSegment(segment.id, this.activeGovernorId);
+          }
+          this.updatePanels();
+        });
+
+        document.getElementById('next-phase').addEventListener('click', () => {
+          this.senate.advancePhase();
+          this.updatePanels();
+        });
+
+        document.getElementById('toggle-active-player').addEventListener('click', () => {
+          this.activeGovernorId = this.activeGovernorId === 0 ? 1 : 0;
+          this.updatePanels();
+        });
+      }
+
+      findSegmentAt(x, y) {
+        const threshold = 12;
+        for (const segment of this.map.segments) {
+          const ax = segment.ax * TILE;
+          const ay = segment.ay * TILE;
+          const bx = segment.bx * TILE;
+          const by = segment.by * TILE;
+          const distance = pointToSegmentDistance(x, y, ax, ay, bx, by);
+          if (distance <= threshold) return segment;
+        }
+        return null;
+      }
+
+      frame(now) {
+        const delta = Math.min(0.25, (now - this.lastTime) / 1000);
+        this.lastTime = now;
+        this.accumulator += delta;
+
+        while (this.accumulator >= this.fixedStep) {
+          this.update(this.fixedStep);
+          this.accumulator -= this.fixedStep;
+        }
+
+        this.render();
+        requestAnimationFrame(this.frame.bind(this));
+      }
+
+      update(dt) {
+        if (this.winner) return;
+
+        this.senate.update(dt);
+        this.walkers.update(dt, this.senate.phase.name);
+
+        if (this.senate.phase.name === 'Simulation') {
+          this.applyEconomy(dt);
+        }
+
+        this.checkVictory();
+        this.updatePanels();
+      }
+
+      applyEconomy(dt) {
+        const segmentOwnership = [0, 1].map((governorId) => this.map.segments.filter((segment) => segment.ownerId === governorId).length);
+
+        this.governors.forEach((governor, index) => {
+          governor.denarii += (2 + segmentOwnership[index]) * dt * 8;
+          governor.population += (0.4 + Math.max(0, governor.workersAvailable - governor.workersEmployed) * 0.002) * dt;
+          governor.workersAvailable = Math.min(5000, governor.workersAvailable + 0.25 * dt);
+        });
+
+        if (Math.floor(this.senate.timeLeft) === this.senate.phase.duration - 1) {
+          this.conflicts.tickCooldowns();
+        }
+      }
+
+      checkVictory() {
+        for (const governor of this.governors) {
+          if (governor.population >= 5000 || governor.denarii >= 10000) {
+            this.winner = governor;
+          }
+        }
+      }
+
+      updatePanels() {
+        document.getElementById('active-player-badge').textContent = `Actif : ${this.governors[this.activeGovernorId].name}`;
+        document.getElementById('phase-badge').textContent = `Tour ${this.senate.turn} · ${this.senate.phase.name} (${Math.ceil(this.senate.timeLeft)}s)`;
+        document.getElementById('turn-panel').innerHTML = `
+          <p><strong>Tour ${this.senate.turn}</strong></p>
+          <p>${this.senate.motion}</p>
+          <p class="small">Phase : ${this.senate.phase.name} · Temps restant : ${Math.ceil(this.senate.timeLeft)} s</p>
+          ${this.winner ? `<p><strong>Victoire de ${this.winner.name}</strong></p>` : ''}
+        `;
+
+        this.governors.forEach((governor) => {
+          const panel = document.getElementById(`player-${governor.id}-panel`);
+          panel.innerHTML = `
+            <h2>${governor.name}</h2>
+            <div class="row"><span>Denarii</span><strong>${Math.floor(governor.denarii)}</strong></div>
+            <div class="row"><span>Population</span><strong>${Math.floor(governor.population)}</strong></div>
+            <div class="row"><span>Favor impérial</span><strong>${governor.favor}</strong></div>
+            <div class="row"><span>Travailleurs</span><strong>${Math.floor(governor.workersAvailable)} / ${governor.workersEmployed}</strong></div>
+            <div class="row"><span>Cooldown sabotage</span><strong>${governor.cooldowns.sabotage}</strong></div>
+            <div class="row"><span>Cooldown capture</span><strong>${governor.cooldowns.roadSeizure}</strong></div>
+          `;
+        });
+      }
+
+      render() {
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.drawTerrain();
+        this.drawResources();
+        this.drawRoads();
+        this.drawWalkers();
+        this.drawOverlay();
+      }
+
+      drawTerrain() {
+        const ctx = this.ctx;
+        for (let y = 0; y < this.map.height; y += 1) {
+          for (let x = 0; x < this.map.width; x += 1) {
+            const tile = this.map.tiles[y * this.map.width + x];
+            ctx.fillStyle = tile.terrain === 'fertility' ? palette.fertility : palette.terrain;
+            ctx.fillRect(x * TILE, y * TILE, TILE - 1, TILE - 1);
+          }
+        }
+      }
+
+      drawResources() {
+        const ctx = this.ctx;
+        for (const resource of this.map.resources) {
+          ctx.fillStyle = palette.panel;
+          ctx.beginPath();
+          ctx.arc(resource.x * TILE, resource.y * TILE, 11, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = palette.gold;
+          ctx.fillText(resource.type, resource.x * TILE - 14, resource.y * TILE - 16);
+        }
+      }
+
+      drawRoads() {
+        const ctx = this.ctx;
+        ctx.lineCap = 'round';
+        for (const segment of this.map.segments) {
+          ctx.strokeStyle = palette.shadow;
+          ctx.lineWidth = 12;
+          ctx.beginPath();
+          ctx.moveTo(segment.ax * TILE, segment.ay * TILE);
+          ctx.lineTo(segment.bx * TILE, segment.by * TILE);
+          ctx.stroke();
+
+          let color = palette.neutralRoad;
+          if (segment.contestedBy !== null) color = palette.contested;
+          else if (segment.ownerId === 0) color = palette.owner0;
+          else if (segment.ownerId === 1) color = palette.owner1;
+
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 8;
+          ctx.beginPath();
+          ctx.moveTo(segment.ax * TILE, segment.ay * TILE);
+          ctx.lineTo(segment.bx * TILE, segment.by * TILE);
+          ctx.stroke();
+
+          if (segment.roadblockBy !== null) {
+            const midX = (segment.ax + segment.bx) * TILE * 0.5;
+            const midY = (segment.ay + segment.by) * TILE * 0.5;
+            ctx.fillStyle = palette.roadblock;
+            ctx.fillRect(midX - 10, midY - 10, 20, 20);
+            ctx.strokeStyle = segment.roadblockBy === 0 ? palette.owner0 : palette.owner1;
+            ctx.strokeRect(midX - 10, midY - 10, 20, 20);
+          }
+        }
+      }
+
+      drawWalkers() {
+        const ctx = this.ctx;
+        for (const walker of this.walkers.walkers) {
+          const segment = this.map.segments[walker.segmentId];
+          const t = walker.progress;
+          const x = lerp(segment.ax * TILE, segment.bx * TILE, t);
+          const y = lerp(segment.ay * TILE, segment.by * TILE, t);
+          ctx.fillStyle = walker.ownerId === 0 ? palette.owner0 : palette.owner1;
+          ctx.beginPath();
+          ctx.arc(x, y, 7, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = palette.text;
+          ctx.font = '12px Georgia';
+          ctx.fillText(walker.type[0].toUpperCase(), x - 4, y - 12);
+        }
+      }
+
+      drawOverlay() {
+        const ctx = this.ctx;
+        ctx.fillStyle = 'rgba(20, 16, 10, 0.72)';
+        ctx.fillRect(10, 10, 420, 74);
+        ctx.fillStyle = palette.text;
+        ctx.font = '16px Georgia';
+        ctx.fillText(`${this.senate.motion}`, 20, 34);
+        ctx.font = '14px Georgia';
+        ctx.fillText(`Gouverneur actif : ${this.governors[this.activeGovernorId].name}`, 20, 58);
+        if (this.winner) {
+          ctx.fillStyle = palette.gold;
+          ctx.fillText(`Victoire de ${this.winner.name}`, 20, 78);
+        }
+      }
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      if (dx === 0 && dy === 0) return Math.hypot(px - x1, py - y1);
+      const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+      const projX = x1 + t * dx;
+      const projY = y1 + t * dy;
+      return Math.hypot(px - projX, py - projY);
+    }
+
+    new Game(document.getElementById('game'));
+  </script>
+</body>
+</html>
